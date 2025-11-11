@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Simd Test</title>
+
+</head>
+
+<body>
+    <h1>Simd Test</h1>
+
+    <button onClick="testJSOnly()">JS Only</button>
+    <button onClick="testWithWASM()">WASM</button>
+    <button onClick="testWithSIMD()">SIMD</button>
+</body>
+
+<script type="module" src="./rust/pkg/rust.js"></script>
+<script>
+    let wasm;
+
+    import('./rust/pkg/rust.js').then(module => {
+        wasm = module;
+    });
+
+    function addByteSequences(lhs, rhs) {
+        const length = lhs.length;
+        const result = new Array(length);
+        for (var i = 0; i < length; i++) {
+            result[i] = lhs[i] + rhs[i];
+        }
+        return result;
+    }
+
+    function testJSOnly() {
+        const length = 100000000; // 100 MB
+        const lhs = generateByteSequence(length);
+        const rhs = generateByteSequence(length);
+
+        const start = performance.now();
+        const result = addByteSequences(lhs, rhs);
+        const end = performance.now();
+
+        alert(`JS Only: ${end - start} ms`);
+    }
+
+    function testWithWASM() {
+        const length = 100000000; // 100 MB
+
+        const lhs = generateByteSequence(length);
+        const rhs = generateByteSequence(length);
+
+        const start = performance.now();
+        const result = wasm.add(lhs, rhs);
+        const end = performance.now();
+
+        alert(`WASM: ${end - start} ms`);
+    }
+
+    function testWithSIMD() {
+        const length = 100000000; // 100 MB
+
+        const lhs = generateByteSequence(length);
+        const rhs = generateByteSequence(length);
+
+        const start = performance.now();
+        const result = wasm.add_with_simd(lhs, rhs);
+        const end = performance.now();
+
+        alert(`SIMD: ${end - start} ms`);
+    }
+
+    function generateByteSequence(length) {
+        const sequence = [];
+        for (var i = 0; i < length; i++) {
+            sequence.push(Math.floor(Math.random() * 256));
+        }
+        return sequence;
+    }
+</script>
+
+</html>
