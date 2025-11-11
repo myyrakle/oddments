@@ -1,1 +1,2 @@
-# 잡동사니
+# oddments
+- A monorepo that contains boilerplate, small examples, etc.
