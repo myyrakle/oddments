@@ -111,45 +111,55 @@ func RefreshLock(ctx context.Context, db *sql.DB, params RefreshLockParams) (Ref
 	return RefreshLockResult{ExpiresAt: expires, Refreshed: true}, nil
 }
 
-type ReleaseLockParams struct {
+type UnlockParams struct {
 	Name  string // Lock Name: unique identifier for the lock
 	Owner string // Lock Owner: identifier for the entity releasing the lock
 }
 
-type ReleaseLockResult struct {
+type UnlockResult struct {
 	Released bool // Whether the lock was released
 }
 
-// ReleaseLock releases the lock if we still own it.
+// Unlock releases the lock if we still own it.
 // Returns whether the lock was released and any error.
-func ReleaseLock(ctx context.Context, db *sql.DB, params ReleaseLockParams) (ReleaseLockResult, error) {
+func Unlock(ctx context.Context, db *sql.DB, params UnlockParams) (UnlockResult, error) {
 	const q = `DELETE FROM locks WHERE name = $1 AND owner = $2;`
 	res, err := db.ExecContext(ctx, q, params.Name, params.Owner)
 	if err != nil {
-		return ReleaseLockResult{}, err
+		return UnlockResult{}, err
 	}
 	rowsAffected, _ := res.RowsAffected()
-	return ReleaseLockResult{Released: rowsAffected > 0}, nil
+	return UnlockResult{Released: rowsAffected > 0}, nil
+}
+
+type CheckLockStatusParams struct {
+	Name  string // Lock Name: unique identifier for the lock
+	Owner string // Lock Owner: identifier for the entity checking the lock
+}
+
+type CheckLockStatusResult struct {
+	Valid     bool      // Whether the lock is still valid
+	ExpiresAt time.Time // Expiration time of the lock
 }
 
 // CheckLockStatus checks if a lock is still valid for the given owner.
 // Returns whether the lock is still valid and any error.
-func CheckLockStatus(ctx context.Context, db *sql.DB, name, owner string) (bool, time.Time, error) {
+func CheckLockStatus(ctx context.Context, db *sql.DB, params CheckLockStatusParams) (CheckLockStatusResult, error) {
 	const q = `
 SELECT expires_at 
 FROM locks 
 WHERE name = $1 AND owner = $2 AND expires_at > NOW();
 `
 	var expires time.Time
-	err := db.QueryRowContext(ctx, q, name, owner).Scan(&expires)
+	err := db.QueryRowContext(ctx, q, params.Name, params.Owner).Scan(&expires)
 	if err == sql.ErrNoRows {
 		// Lock expired or lost
-		return false, time.Time{}, nil
+		return CheckLockStatusResult{Valid: false, ExpiresAt: time.Time{}}, nil
 	}
 	if err != nil {
-		return false, time.Time{}, err
+		return CheckLockStatusResult{Valid: false, ExpiresAt: time.Time{}}, err
 	}
-	return true, expires, nil
+	return CheckLockStatusResult{Valid: true, ExpiresAt: expires}, nil
 }
 
 // initDB creates the locks table if it doesn't exist
@@ -194,22 +204,25 @@ func worker(ctx context.Context, db *sql.DB, workerID int, lockName string) {
 		time.Sleep(1 * time.Second)
 
 		// Check if we still own the lock
-		valid, expires, err := CheckLockStatus(ctx, db, lockName, owner)
+		status, err := CheckLockStatus(ctx, db, CheckLockStatusParams{
+			Name:  lockName,
+			Owner: owner,
+		})
 		if err != nil {
 			log.Printf("[Worker %d] ⚠️ Error checking lock status: %v", workerID, err)
 			return
 		}
-		if !valid {
+		if !status.Valid {
 			log.Printf("[Worker %d] ❌ Lock expired! Lost ownership", workerID)
 			return
 		}
-		log.Printf("[Worker %d] ⏳ Still working... lock valid until %s", workerID, expires.Format("15:04:05"))
+		log.Printf("[Worker %d] ⏳ Still working... lock valid until %s", workerID, status.ExpiresAt.Format("15:04:05"))
 	}
 
 	log.Printf("[Worker %d] ✅ Work completed!", workerID)
 
 	// Release the lock
-	releaseResult, err := ReleaseLock(ctx, db, ReleaseLockParams{
+	releaseResult, err := Unlock(ctx, db, UnlockParams{
 		Name:  lockName,
 		Owner: owner,
 	})
@@ -287,100 +300,4 @@ func main() {
 	// Clean up locks before next demo
 	_, _ = db.ExecContext(ctx, "DELETE FROM locks")
 	time.Sleep(1 * time.Second)
-
-	// Demo 2: Lock timeout/expiration scenario
-	log.Println("\n\n╔═══════════════════════════════════════════════════════════╗")
-	log.Println("║  Demo 2: Lock Timeout & Takeover                         ║")
-	log.Println("╚═══════════════════════════════════════════════════════════╝")
-	log.Println("")
-
-	// Worker A acquires lock with short TTL but doesn't renew it
-	workerA := "worker-A-slow"
-	log.Printf("[Worker A] Acquiring lock with 3 second TTL...")
-	resultA, err := TryLock(ctx, db, TryLockParams{
-		Name:       "timeout-demo-resource",
-		Owner:      workerA,
-		TTLSeconds: 3,
-	})
-	if err != nil {
-		log.Fatalf("TryLock error: %v", err)
-	}
-	if !resultA.Acquired {
-		log.Println("[Worker A] ❌ Failed to acquire lock")
-		return
-	}
-	log.Printf("[Worker A] ✅ Acquired lock until %s", resultA.ExpiresAt.Format("15:04:05"))
-
-	// Worker A starts working but becomes slow/stuck
-	log.Println("[Worker A] 🐌 Starting work but becoming unresponsive...")
-	log.Println("[Worker A] ⚠️ Not refreshing the lock (simulating hung process)")
-
-	// Start Worker B in a goroutine that will try to acquire the lock
-	workerB := "worker-B-takeover"
-	var wgTimeout sync.WaitGroup
-	wgTimeout.Add(1)
-	go func() {
-		defer wgTimeout.Done()
-
-		log.Println("[Worker B] ⏳ Waiting for lock (will retry every 500ms)...")
-		resultB, err := Lock(ctx, db, LockParams{
-			Name:             "timeout-demo-resource",
-			Owner:            workerB,
-			TTLSeconds:       5,
-			IntervalDuration: 500 * time.Millisecond,
-		})
-		if err != nil {
-			log.Printf("[Worker B] ❌ Error acquiring lock: %v", err)
-			return
-		}
-		log.Printf("[Worker B] ✅ Successfully took over expired lock! New expiry: %s", resultB.ExpiresAt.Format("15:04:05"))
-
-		// Check Worker A's lock status (should be invalid now)
-		validA, _, _ := CheckLockStatus(ctx, db, "timeout-demo-resource", workerA)
-		if !validA {
-			log.Println("[Worker B] 🔍 Confirmed: Worker A's lock is no longer valid")
-		}
-
-		// Worker B does some work
-		log.Println("[Worker B] 🔨 Working with the lock...")
-		time.Sleep(2 * time.Second)
-		log.Println("[Worker B] ✅ Work completed")
-
-		// Release the lock
-		releaseResult, _ := ReleaseLock(ctx, db, ReleaseLockParams{
-			Name:  "timeout-demo-resource",
-			Owner: workerB,
-		})
-		if releaseResult.Released {
-			log.Println("[Worker B] 🔓 Lock released")
-		}
-	}()
-
-	// Worker A continues to be slow for 5 seconds (beyond TTL)
-	for i := 1; i <= 5; i++ {
-		time.Sleep(1 * time.Second)
-
-		// Check if Worker A still owns the lock
-		validA, expiresA, err := CheckLockStatus(ctx, db, "timeout-demo-resource", workerA)
-		if err != nil {
-			log.Printf("[Worker A] ⚠️ Error checking lock: %v", err)
-			continue
-		}
-
-		if validA {
-			log.Printf("[Worker A] ⏳ Second %d: Still holding lock (expires at %s)", i, expiresA.Format("15:04:05"))
-		} else {
-			log.Printf("[Worker A] ❌ Second %d: Lock expired and was taken over by another worker!", i)
-			log.Println("[Worker A] 💀 Detecting timeout - should stop work immediately!")
-			break
-		}
-	}
-
-	wgTimeout.Wait()
-
-	log.Println("\n═══════════════════════════════════════════════════════════")
-	log.Println("✅ Timeout demo completed!")
-	log.Println("")
-	log.Println("📌 Key takeaway: Workers MUST periodically check lock status")
-	log.Println("   or refresh the lock to detect when they've lost ownership!")
 }
