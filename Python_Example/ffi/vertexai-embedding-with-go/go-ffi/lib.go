@@ -1,10 +1,14 @@
 package main
 
+/*
+#include <stdlib.h>
+*/
+import "C"
 import (
-	"C"
 	"context"
 	"encoding/json"
 	"fmt"
+	"unsafe"
 
 	aiplatform "cloud.google.com/go/aiplatform/apiv1"
 	"cloud.google.com/go/aiplatform/apiv1/aiplatformpb"
@@ -187,10 +191,8 @@ func GetImageEmbedding(projectID *C.char, location *C.char, imageBase64 *C.char,
 }
 
 //export FreeString
-func FreeString(str *C.char) {
-	// Memory allocated by C.CString should be freed by C code
-	// This is a placeholder for Python to call if needed
-	_ = str
+func FreeString(str unsafe.Pointer) {
+	C.free(str)
 }
 
 func main() {}
