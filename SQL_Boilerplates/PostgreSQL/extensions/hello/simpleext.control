@@ -1,0 +1,3 @@
+comment = 'Simple PostgreSQL extension example for this project'
+default_version = '1.0'
+relocatable = true
